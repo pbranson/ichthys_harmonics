@@ -1,11 +1,7 @@
-import os
-import glob
 import numpy as np
 import pandas as pd
 import xarray as xr
 import pyTMD
-from .utils import murphy_ss, create_time
-
 
 default_fes_constituents = [
     "2n2",
@@ -51,32 +47,108 @@ major_diurnal = ["k1", "o1"]
 cpd = 86400 / 2 / np.pi
 
 
-def load_constituents_properties(c=None):
+def load_constituents_names(c=None):
+    """
+    Load tidal constituents names from default lists.
+    
+    Parameters
+    ----------
+    c : str, optional
+        The tidal constituents list to load. If None, the default FES2014
+        constituents are loaded. Should accept any of the following:
+            'default_fes_constituents'
+            'semidiurnal'
+            'diurnal'
+            'major_semidiurnal'
+            'major_diurnal'
+    
+    Returns
+    -------
+    list
+        The names of the specified tidal constituents. If `c` is a
+        string, a list is returned. If `c` is a list of strings, a
+        list of lists is returned with one list per constituent.
+
+    """
     if c is None:
-        c = default_fes_constituents
+        return default_fes_constituents
+    elif isinstance(c, str) & (c in locals()):
+        return eval(c)
+    else:
+        local_vars = np.array(list(locals().keys()).remove('cpd'))
+        raise ValueError(
+            "c must be None or one of the following: "
+            + ", ".join(local_vars)
+        )
+
+
+def load_constituents_properties(c=None):
+    """
+    Load tidal constituents properties from pyTMD.
+
+    Parameters
+    ----------
+    c : str or list of str, optional
+        The tidal constituents to load. If None, the default FES2014
+        constituents are loaded. If a list of strings, the properties of
+        each constituent are loaded and returned as a DataFrame.
+        Should accept any of the following:
+            'default_fes_constituents'
+            'semidiurnal'
+            'diurnal'
+            'major_semidiurnal'
+            'major_diurnal'
+
+    Returns
+    -------
+    pandas.Series or pandas.DataFrame
+        The properties of the specified tidal constituents. If `c` is a
+        string, a Series is returned. If `c` is a list of strings, a
+        DataFrame is returned with one row per constituent and columns
+        for the constituent properties.
+
+    """
     if isinstance(c, list):
         df = pd.DataFrame({_c: load_constituents_properties(_c) for _c in c}).T
         df = df.sort_values("omega")
         return df
-    elif isinstance(c, str):
+    
+    if (c is None) | (isinstance(c, str) & (c in locals())):
+        df = load_constituents_properties(load_constituents_names(c))
+        return df
+    
+    # Main output of the function
+    elif isinstance(c, str) & (c not in locals()):
         p_names = ["amplitude", "phase", "omega", "alpha", "species"]
         p = pyTMD.load_constituent(c)
         s = pd.Series({_n: _p for _n, _p in zip(p_names, p)})
         s["omega_cpd"] = s["omega"] * cpd
         return s
 
-eq = load_constituents_properties(default_fes_constituents)
 
+def get_tidal_arguments(time, constits=None):
+    """
+    Extract the time-varying tidal constituent properties for the input time series.
 
-def load_constituents(constituents=None):
-    if constituents is not None:
-        c = constituents
-    else:
-        c = default_fes_constituents
-    return c
+    Parameters
+    ----------
+    time : array-like
+        The time argument to convert. If a dict, it should contain
+        keyword arguments that can be passed to pandas.date_range. If
+        an array-like, it should be convertible to a pandas DatetimeIndex.
+    constits : list of str, optional
+        The tidal constituents to load. If None, the default FES2014
+        constituents are loaded.
+        
+    Returns
+    -------
+    xarray.Dataset
+        A dataset indexed by the input time and constituents chosen in 
+        'constits' variable.
 
-
-def get_tidal_arguments(time):
+    """
+    # load tidal constituent properties
+    eq = load_constituents_properties(constits)
 
     if isinstance(time, dict):
         time = pd.date_range(**time)
@@ -84,7 +156,7 @@ def get_tidal_arguments(time):
         # convert to DatetimeIndex
         time = pd.DatetimeIndex(time)
 
-    # -- convert from calendar date to days relative to Jan 1, 1992 (48622 MJD)
+    # convert from calendar date to days relative to Jan 1, 1992 (48622 MJD)
     tide_time = pyTMD.time.convert_calendar_dates(
         time.year,
         time.month,
@@ -93,28 +165,34 @@ def get_tidal_arguments(time):
         minute=time.minute,
     )
 
-    # -- delta time (TT - UT1) file
+    # delta time (TT - UT1) file
     delta_file = pyTMD.utilities.get_data_path(["data", "merged_deltat.data"])
     deltat = pyTMD.time.interpolate_delta_time(delta_file, tide_time)
 
+    # Extract the nodal corrections
     pu, pf, G = pyTMD.arguments(
         tide_time + 48622.0,
-        default_fes_constituents,
+        eq.index.values,
         deltat=deltat,
         corrections="FES",  # model_format='FES'
     )
     # pu, pf are nodal corrections
     # G is the equilibrium argument and common to all models
+
+    # Initiate the dataset
     ds = xr.Dataset(
         None,
         coords=dict(
-            time=("time", time), constituents=("constituents", default_fes_constituents)
+            time=("time", time), constituents=("constituents", eq.index.values)
         ),
     )
+
+    # Add the constituent corrections as variables
     ds["pu"] = (("time", "constituents"), pu)
     ds["pf"] = (("time", "constituents"), pf)
     ds["G"] = (("time", "constituents"), G)
 
+    # Add the constituent properties as variables
     params = eq.to_xarray().rename(index="constituents")
     ds = xr.merge([ds, params])
 
@@ -124,18 +202,59 @@ def get_tidal_arguments(time):
     return ds
 
 
-def get_base_sinusoids(t, constituents):
+def _get_tidal_arguments_float(time, csts_float):
+    """
+    Load tidal arguments with frequency specified as float
+    
+    """
+    ta = xr.Dataset(
+        dict(
+            pu=(("time", "constituents"), np.zeros((time.size, len(csts_float)))),
+            pf=(("time", "constituents"), np.ones((time.size, len(csts_float)))),
+            omega_cpd=("constituents", csts_float),
+        ),
+        coords=dict(
+            constituents=("constituents", [str(c) for c in csts_float]),
+            time=time,
+        ),
+    )
+    ta["omega"] = ta["omega_cpd"] / cpd
+    ta["th"] = ta["omega"] * ((time - time[0]) / pd.Timedelta("1s"))
+    return ta
 
+
+def get_base_sinusoids(time, constituents):
+    """
+    Calculate the base sinusoids for a set of tidal constituents.
+
+    Parameters
+    ----------
+    time : array-like or dict
+        The time values to calculate the base sinusoids for. If a dict,
+        it should contain keyword arguments that can be passed to
+        pandas.date_range. If an array-like, it should be convertible
+        to a pandas DatetimeIndex.
+    constituents : list of str
+        The tidal constituents to use.
+
+    Returns
+    -------
+    pandas.DataFrame
+        A DataFrame with the base sinusoids for the specified time
+        values and tidal constituents. The columns are the tidal
+        constituents and the index is the time values.
+
+    """
     # split constituents from frequencies
     csts_string = [c for c in constituents if isinstance(c, str)]
     csts_float = [c for c in constituents if isinstance(c, float)]
 
     # get named tidal arguments
     if len(csts_string)>0:
-        ta = get_tidal_arguments(t).sel(constituents=csts_string)
+        ta = get_tidal_arguments(time).sel(constituents=csts_string)
     else:
         # add dummy constituent
-        ta = get_tidal_arguments(t).sel(constituents=["m2"])
+        ta = get_tidal_arguments(time).sel(constituents=["m2"])
 
     # get flow tidal arguments on matching timeline
     if len(csts_float)>0:
@@ -153,122 +272,3 @@ def get_base_sinusoids(t, constituents):
     return bcos.values, bsin.values
 
 
-def _get_tidal_arguments_float(time, csts_float):
-    """load tidal arguments with frequency specified as float"""
-    ta = xr.Dataset(
-        dict(
-            pu=(("time", "constituents"), np.zeros((time.size, len(csts_float)))),
-            pf=(("time", "constituents"), np.ones((time.size, len(csts_float)))),
-            omega_cpd=("constituents", csts_float),
-        ),
-        coords=dict(
-            constituents=("constituents", [str(c) for c in csts_float]),
-            time=time,
-        ),
-    )
-    ta["omega"] = ta["omega_cpd"] / cpd
-    ta["th"] = ta["omega"] * ((time - time[0]) / pd.Timedelta("1s"))
-    return ta
-
-
-# ---------------------------  least square ------------------------------------
-
-
-def hanalysis_least_square(y, t, constituents, prefix="h"):
-
-    if isinstance(y, xr.DataArray):
-        y = y.values.squeeze()
-    if isinstance(t, xr.DataArray):
-        t = t.values
-
-    n = y.size
-    m = len(constituents)
-
-    # get base tidal sinusoidal timeseries
-    bcos, bsin = get_base_sinusoids(t, constituents)
-
-    # least square
-    X = np.hstack([bcos, bsin])
-    C = np.linalg.inv(X.T @ X)
-    h = C @ X.T @ y
-
-    # toward getting uncertainties
-    yh = X @ h  # predicted values
-    S = (y - yh).T @ (y - yh)  # sum of squared residual
-    sigma_h2 = S / (n - m)
-    h_var = sigma_h2 * np.diag(C)
-    cov = sigma_h2 * C
-
-    return xr.Dataset(
-        {
-            prefix + "_real": ("c", h[:m]),
-            prefix + "_imag": ("c", h[m:]),
-            prefix + "_real_var": ("c", h_var[:m]),
-            prefix + "_imag_var": ("c", h_var[m:]),
-            prefix + "_cov": (["coef","coef"], cov),
-            prefix : ("time", y),
-            prefix + "_predicted": ("time", yh),
-            prefix + "_residual": ("time", y-yh),
-        },
-        coords=dict(c=constituents,
-                    time=t,
-                    coef=np.arange(2*len(constituents))
-                    ),
-    )    
-
-
-def harmonic_fit(time, obs, ds_attrs):
-    c = load_constituents()
-    
-    # get the tidal arguments (equilibrium phase, nodal corrections ...)
-    ar = get_tidal_arguments(time)
-
-    # actually perform the analysis
-    ha_ls = hanalysis_least_square(obs, time, ar.constituents.values)
-    print(np.round(100*murphy_ss(obs, ha_ls['h_predicted']), 2))
-
-    # add the data attrs
-    ha_ls.attrs = ds_attrs
-
-    # add the stddev of the residuals
-    ha_ls.attrs['stddev'] = np.std(ha_ls['h_residual'].values)
-
-    return ha_ls
-
-
-def load_tide_predictions(time, nc_dir, mooring, order):
-
-    # Initialise the dataset
-    ds_pred = xr.Dataset(coords={'time': time})
-
-    for nco in order:
-        # Load the netcdf file
-        nc = glob.glob(os.path.join(nc_dir, f'*{mooring}*{nco}*.nc'))[0]
-        ds = xr.open_dataset(nc)
-
-        # Do the prediction
-        yh, std_err = least_squares_prediction(time, ds)
-
-        # Add to the dataset
-        ds_pred[nco] = xr.DataArray(yh, dims=['time'])
-        ds_pred[f'{nco}_std_err'] = xr.DataArray(std_err + ds.attrs['stddev'], dims=['time'])
-        
-    return ds_pred
-
-
-def least_squares_prediction(time, ha_ls):
-    
-    # Do the prediction
-    bcos, bsin = get_base_sinusoids(time, ha_ls.c.values)
-    X = np.hstack([bcos, bsin])
-    m = len(ha_ls.c.values)
-    hp = np.hstack([ha_ls.h_real.values, ha_ls.h_imag.values])
-
-    yh = X @ hp
-    if 'h_cov' in ha_ls:
-        std_err = np.sqrt(np.sum((X @ ha_ls.h_cov.values) * X, axis=1))
-    else:
-        std_err = None
-    
-    return yh, std_err
-    
