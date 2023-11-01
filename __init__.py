@@ -1,9 +1,8 @@
 """
-wutils.
+ichthys harmonics.
 
-A Python package for doing things I do too often to re-type. Pronounced "woo-tills".
+A Python package for performic harmonic prediction on current data using least-squares.
 """
 
-__version__ = "0.0.2"
+__version__ = "0.0.1"
 __author__ = 'William Edge'
-__credits__ = 'This ones all me'
