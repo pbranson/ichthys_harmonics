@@ -3,7 +3,7 @@ import glob
 import numpy as np
 import xarray as xr
 from .utils import murphy_ss
-from .harmonic_funcs import get_base_sinusoids, load_constituents_names
+from .harmonic_funcs import get_base_sinusoids, load_constituents_names, rotate_2D
 
 
 # ---------------------------  least square ------------------------------------
@@ -152,6 +152,7 @@ def load_tide_predictions(time, nc_dir, mooring, order):
         # Add to the dataset
         ds_pred[nco] = xr.DataArray(yh, dims=['time'])
         ds_pred[f'{nco}_std_err'] = xr.DataArray(std_err + ds.attrs['stddev'], dims=['time'])
+        ds_pred.attrs[f'{nco}_theta'] = ds.attrs['pca_angle']
         
     return ds_pred
 
@@ -191,14 +192,43 @@ def least_squares_prediction(time, ha_ls):
     
 
 def print_comb_skillscores(ds, ha_ls_BTNS, ha_ls_BTEW, ha_ls_ITNS, ha_ls_ITEW):
-    total_vfit = np.zeros_like(ds['v_meas'].values)
-    total_ufit = np.zeros_like(ds['u_meas'].values)
-    for vt, ut in zip([ha_ls_BTNS, ha_ls_ITNS], [ha_ls_BTEW, ha_ls_ITEW]):
-        one_fit, _ = least_squares_prediction(ds['time'].values, vt)
-        total_vfit += one_fit
-        one_fit, _ = least_squares_prediction(ds['time'].values, ut)
-        total_ufit += one_fit
+    """
+    Print combined skill scores.
 
-    print(f"V-axis combined score: {100*murphy_ss(ds['v_meas'].values, total_vfit):.2f}%")
-    print(f"U-axis combined score: {100*murphy_ss(ds['u_meas'].values, total_ufit):.2f}%")
-    print(f"Total speed score: {100*murphy_ss(np.sqrt(ds['v_meas'].values**2 + ds['u_meas'].values**2), np.sqrt(total_vfit**2 + total_ufit**2)):.2f}%")
+    This function calculates and prints the combined skill scores for North-South, East-West, and total speed.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        The dataset containing the measured values and time values.
+    ha_ls_BTNS, ha_ls_BTEW, ha_ls_ITNS, ha_ls_ITEW : xarray.Dataset
+        The datasets containing the least squares harmonic analysis results.
+
+    Returns
+    -------
+    None
+    """
+    # Identify non-NaN values
+    nanx = ~np.isnan(ds['v_meas'].values)
+    
+    # Initialize total North-South and East-West fits
+    total_nsfit = np.zeros_like(ds['v_meas'].values[nanx])
+    total_ewfit = np.zeros_like(ds['u_meas'].values[nanx])
+    
+    # Loop over North-South and East-West datasets
+    for vt, ut in zip([ha_ls_BTNS, ha_ls_ITNS], [ha_ls_BTEW, ha_ls_ITEW]):
+        # Perform least squares prediction
+        v_fit, _ = least_squares_prediction(ds['time'].values[nanx], vt)
+        u_fit, _ = least_squares_prediction(ds['time'].values[nanx], ut)
+        
+        # Rotate the fits
+        ew_fit, ns_fit = rotate_2D(u_fit, v_fit, ut.attrs['pca_angle'])
+        
+        # Add to total fits
+        total_nsfit += ns_fit
+        total_ewfit += ew_fit
+
+    # Print combined skill scores
+    print(f"North-South combined score: {100*murphy_ss(ds['v_meas'].values[nanx], total_nsfit):.2f}%")
+    print(f"East-West combined score: {100*murphy_ss(ds['u_meas'].values[nanx], total_ewfit):.2f}%")
+    print(f"Total speed score: {100*murphy_ss(np.sqrt(ds['v_meas'].values[nanx]**2 + ds['u_meas'].values[nanx]**2), np.sqrt(total_nsfit**2 + total_ewfit**2)):.2f}%")

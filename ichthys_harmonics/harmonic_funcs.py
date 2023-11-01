@@ -272,3 +272,112 @@ def get_base_sinusoids(time, constituents):
     return bcos.values, bsin.values
 
 
+def rotate_2D(X, Y, theta):
+    """
+    Perform a simple 2D rotation (copied from afloat package for now).
+
+    This function rotates the input 2D data (X, Y) by the specified angle theta.
+
+    Parameters
+    ----------
+    X, Y : array-like
+        The input 2D data.
+    theta : float
+        The rotation angle in radians.
+
+    Returns
+    -------
+    list
+        The rotated 2D data [X1, X2].
+    """
+    # Perform the rotation
+    X1 = X * np.cos(theta) - Y * np.sin(theta)
+    X2 = X * np.sin(theta) + Y * np.cos(theta)
+
+    return [X1, X2]
+
+
+def pca_angle(x_data, y_data):
+    """
+    Principal component analysis of x_data and y_data (copied from afloat package for now).
+
+    This function calculates the angle of the first principal component of the input data.
+
+    This can be done nicely as one big matrix, see:
+    https://medium.com/@nahmed3536/a-python-implementation-of-pca-with-numpy-1bbd3b21de2e
+
+    Parameters
+    ----------
+    x_data, y_data : array-like
+        The input data.
+
+    Returns
+    -------
+    float
+        The angle of the first principal component.
+    """
+    # Standardize the input data
+    std_x = (x_data - x_data.mean()) / x_data.std()
+    std_y = (y_data - y_data.mean()) / y_data.std()
+
+    # Calculate the covariance matrix
+    sig = np.cov(x_data, y_data)
+
+    # Calculate the eigenvalues and eigenvectors
+    w, v = np.linalg.eig(sig)
+
+    # Get the first eigenvector
+    v1 = v[0, :] 
+
+    # Calculate the angle of the first eigenvector
+    theta_e = np.arctan2(v1[1], v1[0])
+
+    # Return the negative of the angle (convention)
+    return -theta_e 
+
+# Rotate data
+def pca_rotate_data(xr_data, yr_data):
+    """
+    Rotate data to principal component direction.
+
+    This function rotates the input data to the direction of the first principal component.
+
+    Parameters
+    ----------
+    xr_data, yr_data : array-like
+        The input data.
+
+    Returns
+    -------
+    array-like, array-like, float
+        The rotated data and the rotation angle.
+    """
+    # Calculate the PCA angle
+    theta = pca_angle(xr_data, yr_data)
+
+    # Rotate the data
+    U_rot, V_rot = rotate_2D(xr_data, yr_data, -theta)
+
+    return U_rot, V_rot, theta
+
+
+def rotate_predictions(ds):
+    """
+    Rotate predictions to principal component direction.
+
+    This function rotates the predictions in the input dataset to the direction of the first principal component.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        The input dataset.
+
+    Returns
+    -------
+    xarray.Dataset
+        The dataset with rotated predictions.
+    """
+    # Rotate the predictions
+    ds['BTEW'], ds['BTNS'] = rotate_2D(ds['BTEW'], ds['BTNS'], ds.attrs['BTEW_theta'])
+    ds['ITEW'], ds['ITNS'] = rotate_2D(ds['ITEW'], ds['ITNS'], ds.attrs['ITEW_theta'])
+    return ds
